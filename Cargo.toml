@@ -1,0 +1,12 @@
+[package]
+name = "please"
+version = "0.1.0"
+edition = "2021"
+description = "Describe what you want; Claude writes the shell command; you confirm; it runs."
+
+[dependencies]
+
+[profile.release]
+strip = true
+opt-level = "z"
+lto = true
