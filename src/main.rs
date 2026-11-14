@@ -12,7 +12,7 @@ use std::process::{exit, Command, Stdio};
 
 const SYSTEM_PROMPT: &str = "You turn a natural-language request into exactly ONE shell command \
 for the user's machine. Output ONLY the raw command: no markdown, no code fences, no comments, \
-no explanation. If several steps are needed, chain them on one line. Use the real file names \
+no explanation, and never wrap it in backticks or quotes. If several steps are needed, chain them on one line. Use the real file names \
 from the directory listing. Use the shell named below and tools commonly available on this OS. \
 Do not use sudo/admin rights unless the request truly needs it.";
 
@@ -111,7 +111,11 @@ fn context(shell: &str) -> String {
     )
 }
 
+/// Forces Claude to answer with {"command": "..."} instead of free text.
+const SCHEMA: &str = r#"{"type":"object","properties":{"command":{"type":"string"}},"required":["command"],"additionalProperties":false}"#;
+
 /// Run `claude -p`, sending the prompt on stdin (avoids quoting problems on every OS).
+/// No tools and no MCP servers: keeps it fast, cheap, and stops it from "doing" the task itself.
 fn ask_claude(prompt: &str) -> Result<String, String> {
     let model = env::var("PLEASE_MODEL").unwrap_or_else(|_| "haiku".into());
     // npm installs on Windows give `claude.cmd`, which Command won't find as plain `claude`.
@@ -120,6 +124,8 @@ fn ask_claude(prompt: &str) -> Result<String, String> {
     for bin in candidates {
         let child = Command::new(bin)
             .args(["-p", "--model", &model, "--system-prompt", SYSTEM_PROMPT])
+            .args(["--tools", "", "--strict-mcp-config", "--no-session-persistence"])
+            .args(["--output-format", "json", "--json-schema", SCHEMA])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -137,23 +143,53 @@ fn ask_claude(prompt: &str) -> Result<String, String> {
             .map_err(|e| e.to_string())?;
         let out = child.wait_with_output().map_err(|e| e.to_string())?;
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            return Err(if stderr.trim().is_empty() { stdout } else { stderr.into_owned() });
+        let json: serde_json::Value = match serde_json::from_str(&stdout) {
+            Ok(v) => v,
+            Err(_) => {
+                // Not JSON: an error message (e.g. not logged in). Never treat it as a command.
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                return Err(if stderr.trim().is_empty() { stdout } else { stderr.into_owned() });
+            }
+        };
+        if !out.status.success() || json["is_error"].as_bool() == Some(true) {
+            return Err(json["result"].as_str().unwrap_or("unknown error").to_string());
         }
-        return Ok(stdout);
+        return json["structured_output"]["command"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| "Claude didn't return a command".to_string());
     }
     Err("`claude` not found — install Claude Code and log in first".into())
 }
 
-/// Drop code fences and blank lines, trim whitespace.
+/// Drop code fences, blank lines, a wrapping pair of `backticks` and a leading "$ " prompt.
 fn clean(s: &str) -> String {
-    s.lines()
+    let joined = s
+        .lines()
         .filter(|l| !l.trim_start().starts_with("```") && !l.trim().is_empty())
         .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_string()
+        .join("\n");
+    let mut cmd = joined.trim();
+    if cmd.len() >= 2 && cmd.starts_with('`') && cmd.ends_with('`') {
+        cmd = cmd[1..cmd.len() - 1].trim();
+    }
+    if let Some(rest) = cmd.strip_prefix("$ ") {
+        cmd = rest.trim();
+    }
+    cmd.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clean;
+
+    #[test]
+    fn strips_wrappers() {
+        assert_eq!(clean("`sw_vers && uname -a`"), "sw_vers && uname -a");
+        assert_eq!(clean("```bash\nls -la\n```\n"), "ls -la");
+        assert_eq!(clean("$ ls"), "ls");
+        assert_eq!(clean("echo `date`"), "echo `date`");
+    }
 }
 
 fn prompt_line(label: &str) -> String {
