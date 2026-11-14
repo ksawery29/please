@@ -23,10 +23,6 @@ Enter runs it, `n` cancels, `e` lets you type a replacement.
 
 That puts `please` in `~/.cargo/bin` (already on your PATH if you installed Rust with rustup).
 
-A ready-made macOS Apple Silicon binary is in `bin/` - copy it anywhere on your PATH, e.g.
-
-    cp bin/please-macos-arm64 ~/.local/bin/please
-
 ## Notes
 
 - Runs commands with your `$SHELL` on macOS/Linux and PowerShell on Windows.
